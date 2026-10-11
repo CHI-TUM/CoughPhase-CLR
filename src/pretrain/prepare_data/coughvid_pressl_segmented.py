@@ -8,6 +8,24 @@ from glob import glob
 # for pretraining
 
 
+def load_test_uuids():
+    # union of the benchmark test splits (covid test is a subset of gender test)
+    test_uuids = set()
+    for split in ["gender", "covid"]:
+        test_uuids.update(
+            np.load(
+                f"datasets/coughvid/coughvid_{split}_test_uuids.npy", allow_pickle=True
+            ).tolist()
+        )
+    # some wav files are named uuid[:-1] (see coughvid_processing.py)
+    return test_uuids | {uuid[:-1] for uuid in test_uuids}
+
+
+def is_test_recording(segment_name, test_uuids):
+    # segments are named <recording>_cough_<i>
+    return segment_name.rsplit("_cough_", 1)[0] in test_uuids
+
+
 def preprocess_spectrogram_SSL(
     modality="modality", input_sec=2, form="", nfft=1024, hop=512, TRIM=True
 ):
@@ -20,6 +38,11 @@ def preprocess_spectrogram_SSL(
     filenames = glob(path + f"wav{form}/*.wav")
 
     filenames = [f"{os.path.basename(f)}" for f in filenames]
+    # keep benchmark test recordings out of pretraining
+    test_uuids = load_test_uuids()
+    filenames = [
+        f for f in filenames if not is_test_recording(f.split(".")[0], test_uuids)
+    ]
     invalid_data = 0
 
     filename_list = []

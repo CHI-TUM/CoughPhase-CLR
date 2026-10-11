@@ -334,12 +334,12 @@ def train_multiple_data(
                 if strategy == "phase":
                     filenames1 = list(
                         np.load(
-                            "datasets/coughvid/entire_spec_filenames_segmented_phase_1.npy"
+                            "datasets/covidUK/entire_cough_filenames_segmented_phase_1.npy"
                         )
                     )
                     filenames2 = list(
                         np.load(
-                            "datasets/coughvid/entire_spec_filenames_segmented_phase_2.npy"
+                            "datasets/covidUK/entire_cough_filenames_segmented_phase_2.npy"
                         )
                     )
                 else:
@@ -553,4 +553,5 @@ if __name__ == "__main__":
         spec_augment=args.specaugment,
         batch_size=args.batch_size,
         data_percentage=args.data_percentage,
+        target_steps=args.target_steps,
     )
