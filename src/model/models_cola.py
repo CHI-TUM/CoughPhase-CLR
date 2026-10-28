@@ -280,6 +280,11 @@ class ColaMD(pl.LightningModule):
         covidUKcough Length of Training, Validation, Testing: 138 16 16
         """
 
+        if isinstance(x, dict):
+            # single_source_loader already drew the dataset and loaded only its batch
+            s = x["dataset_idx"]
+            return self._calculate_loss(x["batch"], batch_idx, "train" + str(s))
+
         batch, batch_idx, dataloader_idx = x
         lst = range(len(batch))
 
