@@ -239,8 +239,22 @@ def interpolate_to_size(x, target_size=50):
     return interpolated.numpy()
 
 
-# time frames of a phase view (interpolate_to_size), also the crop length of the crop fallback
 PHASE_LEN = 50
+# positive pairs built from segmented cough lists
+SEGMENT_STRATEGIES = ("phase", "segcrop")
+DEFAULT_SEG_CROP_LEN = 9
+
+
+def load_segment_lists(prefix, strategy, suffix=""):
+    """file1/file2 lists: phase 1 and phase 2 of each segment (phase), the whole segment twice (segcrop)"""
+    if strategy == "phase":
+        return (
+            list(np.load(f"{prefix}_phase_1{suffix}.npy")),
+            list(np.load(f"{prefix}_phase_2{suffix}.npy")),
+        )
+    whole = list(np.load(f"{prefix}{suffix}.npy"))
+    return whole, whole
+
 
 output_dir = "spectrogram_images"
 os.makedirs(output_dir, exist_ok=True)
@@ -260,10 +274,20 @@ class AudioDataset(torch.utils.data.Dataset):
         positive_pair_method="crop",
         preprocessing=None,
         data_percentage=1.0,
+        seg_crop_len=DEFAULT_SEG_CROP_LEN,
+        crop_log=None,
+        crop_log_items=0,
     ):
         """
         max len: 251 for 8 secs, 157 for 5 second, 126 for 4 seconds, 63 for 2 seconds, 32 for 1 second
+        seg_crop_len: segcrop crop length (frames), each crop is interpolated to PHASE_LEN
+        crop_log: path prefix; each worker logs its first crop_log_items crops to <crop_log>_worker<i>.tsv
         """
+        self.seg_crop_len = seg_crop_len
+        self.crop_log = crop_log
+        self.crop_log_items = crop_log_items
+        self._crop_log_file = None
+        self._crop_logged = 0
         self.data = data
         self.data_2 = data_2
         self.max_len = max_len
@@ -281,12 +305,35 @@ class AudioDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data)
 
+    def _log_crop(self, idx, x, crop_len, start1, start2, fallback):
+        if self._crop_log_file is None:
+            info = torch.utils.data.get_worker_info()
+            path = f"{self.crop_log}_worker{info.id if info else 0}.tsv"
+            # workers are restarted every epoch: only the first epoch's workers log
+            if os.path.exists(path):
+                self._crop_log_file = False
+            else:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                self._crop_log_file = open(path, "w", buffering=1)
+                self._crop_log_file.write(
+                    "worker_pid\tindex\tfile\tframes\tcrop_len\tstart1\tstart2\tfallback\n"
+                )
+        if self._crop_log_file and self._crop_logged < self.crop_log_items:
+            self._crop_log_file.write(
+                f"{os.getpid()}\t{idx}\t{self.data[idx]}\t{x.shape[0]}\t{crop_len}\t{start1}\t{start2}\t{int(fallback)}\n"
+            )
+            self._crop_logged += 1
+
     def __getitem__(self, idx):
         pair_method = self.positive_pair_method
-        if pair_method == "phase" and "_segmented_phase_" not in str(self.data[idx]):
+        fallback = False
+        if pair_method in SEGMENT_STRATEGIES and "_segmented" not in str(
+            self.data[idx]
+        ):
             # a CE recording without detected segments (crop fallback, train_multiple_data):
             # two random crops of its full spectrogram, as for CE
             pair_method = "crop"
+            fallback = True
             assert (
                 self.max_len == PHASE_LEN
             ), "crop fallback views must match the interpolated phase views"
@@ -300,7 +347,10 @@ class AudioDataset(torch.utils.data.Dataset):
             if os.path.basename(npy_path1) != os.path.basename(npy_path2):
                 print("paths not equal: ", npy_path1, npy_path2)
 
-        elif self.positive_pair_method != "phase":
+        elif pair_method == "segcrop":
+            x = np.load(self.data[idx] + ".npy")
+
+        elif not fallback:
             if self.from_npy:
                 npy_path = self.data[idx]
                 x = np.load(npy_path + ".npy")
@@ -315,9 +365,29 @@ class AudioDataset(torch.utils.data.Dataset):
                 x1 = interpolate_to_size(x1, target_size=PHASE_LEN)
                 x2 = interpolate_to_size(x2, target_size=PHASE_LEN)
 
+            elif pair_method == "segcrop":
+                # two random crops of one whole cough segment (segment shorter than seg_crop_len: the whole
+                # segment), each interpolated to the phase-view length as in CLR
+                crop_len = min(self.seg_crop_len, x.shape[0])
+                x1, start1 = random_crop(x, crop_size=crop_len, return_start=True)
+                x2, start2 = random_crop(x, crop_size=crop_len, return_start=True)
+                if self.crop_log:
+                    self._log_crop(idx, x, crop_len, start1, start2, fallback)
+                x1 = interpolate_to_size(x1, target_size=PHASE_LEN)
+                x2 = interpolate_to_size(x2, target_size=PHASE_LEN)
+
             elif pair_method == "crop":
-                x1 = random_crop(x, crop_size=self.max_len)
-                x2 = random_crop(x, crop_size=self.max_len)
+                if self.crop_log:
+                    x1, start1 = random_crop(
+                        x, crop_size=self.max_len, return_start=True
+                    )
+                    x2, start2 = random_crop(
+                        x, crop_size=self.max_len, return_start=True
+                    )
+                    self._log_crop(idx, x, self.max_len, start1, start2, fallback)
+                else:
+                    x1 = random_crop(x, crop_size=self.max_len)
+                    x2 = random_crop(x, crop_size=self.max_len)
 
             elif pair_method == "mask":
                 time_len = x.shape[0]
@@ -387,6 +457,27 @@ class LogAmpScale(pl.Callback):
             pl_module.log("amp_scale", scaler.get_scale(), on_step=True, on_epoch=False)
 
 
+class PrintFirstBatch(pl.Callback):
+    """Prints the source and view shapes of the first training batch (audit: every view is 50 frames)."""
+
+    def __init__(self, source_names):
+        self.source_names = source_names
+        self.done = False
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        if not self.done and isinstance(batch, dict):
+            x1, x2 = batch["batch"]
+            print(
+                "first batch:",
+                self.source_names[batch["dataset_idx"]],
+                "x1",
+                tuple(x1.shape),
+                "x2",
+                tuple(x2.shape),
+            )
+            self.done = True
+
+
 class DecayLearningRate(pl.Callback):
     """
     Multiplies the learning rate by 0.99 every `decay_steps` optimizer steps (applied
@@ -434,13 +525,15 @@ def train_multiple_data(
     include_test=(),
     split_dump_dir=None,
     train_file_log=None,
+    seg_crop_len=DEFAULT_SEG_CROP_LEN,
+    crop_log=None,
 ):
     print(data_source)
     if include_test:
-        # phase: segmented CLR lists; crop: the unsegmented CE lists (datasets/build_ce_test_pretrain_lists.py)
-        assert (strategy == "phase" and preprocessing == "segmented") or (
+        # phase/segcrop: segmented lists; crop: the unsegmented CE lists (datasets/build_ce_test_pretrain_lists.py)
+        assert (strategy in SEGMENT_STRATEGIES and preprocessing == "segmented") or (
             strategy == "crop" and preprocessing is None
-        ), "include_test: phase+segmented (CLR) or crop+unsegmented (CE) lists only"
+        ), "include_test: phase/segcrop+segmented (CLR, CE-seg) or crop+unsegmented (CE) lists only"
         assert set(include_test) <= set(data_source), (include_test, data_source)
         print("INCLUDING benchmark test recordings for:", list(include_test))
 
@@ -449,6 +542,10 @@ def train_multiple_data(
     epochs = n_epoches
 
     print(f"contrastive strategy: {strategy}")
+    if strategy == "segcrop":
+        print(
+            f"seg crop len {seg_crop_len} frames, each crop interpolated to {PHASE_LEN} frames"
+        )
 
     num_batch = []
 
@@ -496,19 +593,14 @@ def train_multiple_data(
                     np.load("datasets/coughvid/entire_spec_filenames_smooth.npy")
                 )
             elif preprocessing == "segmented":
-                if strategy == "phase":
+                if strategy in SEGMENT_STRATEGIES:
                     # same recordings as the CE list below (datasets/coughvid/get_phase_filenames.py);
                     # with include_test: + the benchmark test recordings CE leaks
                     suffix = "_with_test" if dt in include_test else ""
-                    filenames1 = list(
-                        np.load(
-                            f"datasets/coughvid/entire_spec_filenames_segmented_phase_1{suffix}.npy"
-                        )
-                    )
-                    filenames2 = list(
-                        np.load(
-                            f"datasets/coughvid/entire_spec_filenames_segmented_phase_2{suffix}.npy"
-                        )
+                    filenames1, filenames2 = load_segment_lists(
+                        "datasets/coughvid/entire_spec_filenames_segmented",
+                        strategy,
+                        suffix,
                     )
                     ce_filenames = np.load(
                         f"datasets/coughvid/entire_spec_filenames{suffix}.npy"
@@ -541,19 +633,14 @@ def train_multiple_data(
                     np.load("datasets/covidUK/entire_cough_filenames_smooth.npy")
                 )
             elif preprocessing == "segmented":
-                if strategy == "phase":
+                if strategy in SEGMENT_STRATEGIES:
                     # same recordings as the CE list below (datasets/covidUK/get_phase_filenames.py);
                     # with include_test: + the T2 (covidukcough) test recordings CE leaks
                     suffix = "_with_t2test" if dt in include_test else ""
-                    filenames1 = list(
-                        np.load(
-                            f"datasets/covidUK/entire_cough_filenames_segmented_phase_1{suffix}.npy"
-                        )
-                    )
-                    filenames2 = list(
-                        np.load(
-                            f"datasets/covidUK/entire_cough_filenames_segmented_phase_2{suffix}.npy"
-                        )
+                    filenames1, filenames2 = load_segment_lists(
+                        "datasets/covidUK/entire_cough_filenames_segmented",
+                        strategy,
+                        suffix,
                     )
                     ce_filenames = np.load(
                         f"datasets/covidUK/entire_cough_filenames{suffix}.npy"
@@ -573,7 +660,7 @@ def train_multiple_data(
 
         random.seed(42)
 
-        if strategy == "phase" and ce_filenames is not None:
+        if strategy in SEGMENT_STRATEGIES and ce_filenames is not None:
             # the recordings CE trains/validates on at this data_percentage, with all their segment pairs
             # (recordings without segments: crop fallback below)
             ce_train, ce_val = select_recordings(ce_filenames, data_percentage)
@@ -609,6 +696,21 @@ def train_multiple_data(
                 "val",
                 len(no_segments["val"]),
             )
+            if strategy == "segcrop":
+                short = {
+                    part: sum(
+                        np.load(str(f) + ".npy", mmap_mode="r").shape[0] < seg_crop_len
+                        for f in files
+                        if "_segmented" in str(f)
+                    )
+                    for part, files in (("train", train1), ("val", test1))
+                }
+                print(
+                    f"segments shorter than seg crop len {seg_crop_len} (cropped whole): train",
+                    short["train"],
+                    "val",
+                    short["val"],
+                )
 
         elif strategy == "phase":
             combined_filenames = list(zip(filenames1, filenames2))
@@ -626,7 +728,7 @@ def train_multiple_data(
                 filenames2, test_size=0.1, random_state=1337
             )
 
-        if strategy == "phase":
+        if strategy in SEGMENT_STRATEGIES:
             if split_dump_dir:
                 os.makedirs(split_dump_dir, exist_ok=True)
                 np.savez(
@@ -647,6 +749,9 @@ def train_multiple_data(
                 method=method,
                 positive_pair_method=strategy,
                 preprocessing=preprocessing,
+                seg_crop_len=seg_crop_len,
+                crop_log=os.path.join(crop_log, dt) if crop_log else None,
+                crop_log_items=100 * batch_size,
             )
             val_data = AudioDataset(
                 test1,
@@ -658,6 +763,7 @@ def train_multiple_data(
                 method=method,
                 positive_pair_method=strategy,
                 preprocessing=preprocessing,
+                seg_crop_len=seg_crop_len,
             )
 
         else:
@@ -779,6 +885,7 @@ def train_multiple_data(
             *([DecayLearningRate(lr_decay_steps)] if lr_decay_steps > 0 else []),
             LearningRateMonitor(logging_interval="step"),
             LogAmpScale(),
+            PrintFirstBatch(list(data_source.keys())),
             checkpoint_callback,
             *(
                 [
@@ -848,6 +955,18 @@ if __name__ == "__main__":
         help="record the files of every trained batch here (TrainedFileLog)",
     )
     parser.add_argument(
+        "--seg_crop_len",
+        type=int,
+        default=DEFAULT_SEG_CROP_LEN,
+        help="--strategy segcrop: crop length in frames, each crop is interpolated to 50 frames",
+    )
+    parser.add_argument(
+        "--crop_log",
+        type=str,
+        default=None,
+        help="log the crops (file, length, crop starts) of the first epoch's workers here, at most 100 batches each",
+    )
+    parser.add_argument(
         "--val_check_steps",
         type=int,
         default=1000,
@@ -904,4 +1023,6 @@ if __name__ == "__main__":
         include_test=args.include_test,
         split_dump_dir=args.split_dump_dir,
         train_file_log=args.train_file_log,
+        seg_crop_len=args.seg_crop_len,
+        crop_log=args.crop_log,
     )

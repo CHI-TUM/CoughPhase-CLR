@@ -25,8 +25,10 @@ def crop_first(data, crop_size=128):
     return data[0:crop_size, :]
 
 
-def random_crop(data, crop_size=128):
+def random_crop(data, crop_size=128, return_start=False):
     start = int(random.random() * (data.shape[0] - crop_size))
+    if return_start:  # crop log of OPERA-CE-Cough-seg (cola_training.py --crop_log)
+        return data[start : (start + crop_size), :], start
     return data[start : (start + crop_size), :]
 
 
