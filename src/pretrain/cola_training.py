@@ -431,10 +431,18 @@ def train_multiple_data(
     target_steps=None,
     lr_decay_steps=DEFAULT_LR_DECAY_STEPS,
     val_check_steps=1000,
+    include_test=(),
     split_dump_dir=None,
     train_file_log=None,
 ):
     print(data_source)
+    if include_test:
+        # phase: segmented CLR lists; crop: the unsegmented CE lists (datasets/build_ce_test_pretrain_lists.py)
+        assert (strategy == "phase" and preprocessing == "segmented") or (
+            strategy == "crop" and preprocessing is None
+        ), "include_test: phase+segmented (CLR) or crop+unsegmented (CE) lists only"
+        assert set(include_test) <= set(data_source), (include_test, data_source)
+        print("INCLUDING benchmark test recordings for:", list(include_test))
 
     method = training_method
 
@@ -489,19 +497,21 @@ def train_multiple_data(
                 )
             elif preprocessing == "segmented":
                 if strategy == "phase":
-                    # same recordings as the CE list below (datasets/coughvid/get_phase_filenames.py)
+                    # same recordings as the CE list below (datasets/coughvid/get_phase_filenames.py);
+                    # with include_test: + the benchmark test recordings CE leaks
+                    suffix = "_with_test" if dt in include_test else ""
                     filenames1 = list(
                         np.load(
-                            "datasets/coughvid/entire_spec_filenames_segmented_phase_1.npy"
+                            f"datasets/coughvid/entire_spec_filenames_segmented_phase_1{suffix}.npy"
                         )
                     )
                     filenames2 = list(
                         np.load(
-                            "datasets/coughvid/entire_spec_filenames_segmented_phase_2.npy"
+                            f"datasets/coughvid/entire_spec_filenames_segmented_phase_2{suffix}.npy"
                         )
                     )
                     ce_filenames = np.load(
-                        "datasets/coughvid/entire_spec_filenames.npy"
+                        f"datasets/coughvid/entire_spec_filenames{suffix}.npy"
                     )
                 else:
                     print("using coughvid segmented")
@@ -509,9 +519,11 @@ def train_multiple_data(
                         np.load("datasets/coughvid/entire_spec_filenames_segmented.npy")
                     )
             else:
-                # the CLR phase lists follow this list
+                # with include_test: clean list + the benchmark test recordings
+                # (datasets/build_ce_test_pretrain_lists.py); the CLR phase lists follow this list
+                suffix = "_with_test" if dt in include_test else ""
                 filenames = list(
-                    np.load("datasets/coughvid/entire_spec_filenames.npy")
+                    np.load(f"datasets/coughvid/entire_spec_filenames{suffix}.npy")
                 )
 
         elif dt == "hf_lung":
@@ -530,19 +542,21 @@ def train_multiple_data(
                 )
             elif preprocessing == "segmented":
                 if strategy == "phase":
-                    # same recordings as the CE list below (datasets/covidUK/get_phase_filenames.py)
+                    # same recordings as the CE list below (datasets/covidUK/get_phase_filenames.py);
+                    # with include_test: + the T2 (covidukcough) test recordings CE leaks
+                    suffix = "_with_t2test" if dt in include_test else ""
                     filenames1 = list(
                         np.load(
-                            "datasets/covidUK/entire_cough_filenames_segmented_phase_1.npy"
+                            f"datasets/covidUK/entire_cough_filenames_segmented_phase_1{suffix}.npy"
                         )
                     )
                     filenames2 = list(
                         np.load(
-                            "datasets/covidUK/entire_cough_filenames_segmented_phase_2.npy"
+                            f"datasets/covidUK/entire_cough_filenames_segmented_phase_2{suffix}.npy"
                         )
                     )
                     ce_filenames = np.load(
-                        "datasets/covidUK/entire_cough_filenames.npy"
+                        f"datasets/covidUK/entire_cough_filenames{suffix}.npy"
                     )
                 else:
                     print("using covidUKcough segmented")
@@ -550,9 +564,11 @@ def train_multiple_data(
                         np.load("datasets/covidUK/entire_cough_filenames_segmented.npy")
                     )
             else:
-                # the CLR phase lists follow this list
+                # with include_test: clean list + the T2 test recordings
+                # (datasets/build_ce_test_pretrain_lists.py); the CLR phase lists follow this list
+                suffix = "_with_t2test" if dt in include_test else ""
                 filenames = list(
-                    np.load("datasets/covidUK/entire_cough_filenames.npy")
+                    np.load(f"datasets/covidUK/entire_cough_filenames{suffix}.npy")
                 )
 
         random.seed(42)
@@ -813,6 +829,13 @@ if __name__ == "__main__":
         help="x0.99 every n steps; 0 = constant learning rate",
     )
     parser.add_argument(
+        "--include_test",
+        nargs="*",
+        default=[],
+        choices=["coughvid", "covidUKcough"],
+        help="leakage experiments: pretrain on lists that contain the benchmark test recordings",
+    )
+    parser.add_argument(
         "--split_dump_dir",
         type=str,
         default=None,
@@ -878,6 +901,7 @@ if __name__ == "__main__":
         target_steps=args.target_steps,
         lr_decay_steps=args.lr_decay_steps,
         val_check_steps=args.val_check_steps,
+        include_test=args.include_test,
         split_dump_dir=args.split_dump_dir,
         train_file_log=args.train_file_log,
     )

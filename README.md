@@ -123,11 +123,11 @@ Key flags:
 - `--data_percentage` — fraction of pretraining data (for the data-efficiency study).
 - `--target_steps`, `--specaugment`, `--encoder`, `--batch_size` — training controls.
 
-To reproduce the full **data-efficiency sweep** (100/80/60/40/20 %) for both CoughPhase-CLR
-and OPERA-CE-Cough:
+To reproduce the CoughPhase-CLR experiments (data leakage: COUGHVID / covidUK / both with and without the
+benchmark test recordings; data size: 100/80/60/40/20 %), including benchmarks and audit logs:
 
 ```
-sh scripts/multiple_pretrain.sh
+bash scripts/clr_experiments.sh
 ```
 
 Trained checkpoints are written under `cks/model/combined/coughvid_covidUKcough/`.
