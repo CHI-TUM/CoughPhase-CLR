@@ -90,12 +90,13 @@ def extract_and_save_embeddings_baselines(modality="exhalation", feature="opensm
         np.save(feature_dir + "audiomae_feature_{}.npy".format(modality), np.array(audiomae_feature))
 
 
-def extract_and_save_embeddings(feature="operaCE", modality="exhalation", input_sec=8, dim=1280):
+def extract_and_save_embeddings(feature="operaCE", modality="exhalation", input_sec=8, dim=1280, output_file_name=""):
     from src.benchmark.model_util import extract_opera_feature
     sound_dir_loc = np.load(feature_dir + "sound_dir_loc_{}.npy".format(modality))
     opera_features = extract_opera_feature(sound_dir_loc,  pretrain=feature, input_sec=input_sec, dim=dim)
-    feature += str(dim)
-    np.save(feature_dir +  feature + "_feature_{}.npy".format(modality), np.array(opera_features))
+    if not output_file_name:
+        output_file_name = feature + str(dim)
+    np.save(feature_dir + output_file_name + "_feature_{}.npy".format(modality), np.array(opera_features))
 
 
 if __name__ == '__main__':
@@ -105,6 +106,7 @@ if __name__ == '__main__':
     parser.add_argument("--modality", type=str, default="exhalation")
     parser.add_argument("--min_len_cnn", type=int, default=2)
     parser.add_argument("--min_len_htsat", type=int, default=2)
+    parser.add_argument("--output_file_name", type=str, default="")
     args = parser.parse_args()
 
     if not os.path.exists(feature_dir):
@@ -121,4 +123,8 @@ if __name__ == '__main__':
             input_sec = args.min_len_cnn
         elif args.pretrain == "operaGT":
             input_sec = 8.18
-        extract_and_save_embeddings(args.pretrain, args.modality, input_sec, dim=args.dim)
+        else:
+            # checkpoint path of an EfficientNet encoder (CoughPhase-CLR / OPERA-CE-Cough)
+            input_sec = args.min_len_cnn
+        extract_and_save_embeddings(args.pretrain, args.modality, input_sec, dim=args.dim,
+                                    output_file_name=args.output_file_name)

@@ -69,9 +69,12 @@ if __name__ == "__main__":
         input_sec = 8.18
     else:
         input_sec = args.min_len_cnn
-    extract_and_save_eGeMAPS()
-    # extract_and_save_embeddings(
-    #     args.pretrain,
-    #     input_sec,
-    #     output_file_name=args.output_file_name,
-    # )
+    if args.pretrain == "opensmile":
+        extract_and_save_eGeMAPS()
+    else:
+        extract_and_save_embeddings(
+            args.pretrain,
+            input_sec,
+            dim=args.dim,
+            output_file_name=args.output_file_name,
+        )

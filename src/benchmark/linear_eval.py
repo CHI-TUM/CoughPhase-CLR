@@ -75,6 +75,19 @@ class DecayLearningRate(pl.Callback):
             self.old_lrs[opt_idx] = new_lr_group
 
 
+def standardize_splits(x_train, *others):
+    """Scale features with mean/std fitted on the training split only (no leakage into val/test)."""
+    from sklearn.preprocessing import StandardScaler
+
+    scaler = StandardScaler().fit(x_train)
+    return [scaler.transform(x_train)] + [scaler.transform(x) for x in others]
+
+
+def ckpt_suffix(standardize):
+    # keeps the default checkpoint names unchanged
+    return ["std"] if standardize else []
+
+
 def linear_evaluation_covid19sounds(
     task=1,
     use_feature="opensmile",
@@ -139,7 +152,7 @@ def linear_evaluation_covid19sounds(
         test_data, batch_size=batch_size, shuffle=True, num_workers=2
     )
 
-    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, head=head)
+    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, lr=lr, head=head)
 
     checkpoint_callback = ModelCheckpoint(
         monitor="valid_auc",
@@ -272,6 +285,7 @@ def linear_evaluation_icbhidisease(
         feat_dim=feat_dim,
         classes=2,
         l2_strength=l2_strength,
+        lr=lr,
         loss_func=loss_func,
         head=head,
     )
@@ -382,6 +396,7 @@ def linear_evaluation_coughCOPD(
         feat_dim=feat_dim,
         classes=2,
         l2_strength=l2_strength,
+        lr=lr,
         loss_func=loss_func,
         head=head,
     )
@@ -487,7 +502,7 @@ def linear_evaluation_kauh(
         test_data, batch_size=batch_size, shuffle=True, num_workers=1
     )
 
-    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, head=head)
+    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, lr=lr, head=head)
 
     logger = CSVLogger(
         save_dir="cks/logs",
@@ -558,6 +573,8 @@ def linear_evaluation_coswara(
     label="sex",
     head="linear",
     map_google=False,
+    standardize=False,
+    return_valid=False,
 ):
     print("*" * 48)
     print(
@@ -601,6 +618,9 @@ def linear_evaluation_coswara(
         # for vggish, this produces a better and more reasonable result, otherwise an extremely low AUROC
         X_train, y_train = downsample_balanced_dataset(X_train, y_train)
 
+    if standardize:
+        X_train, X_val, X_test = standardize_splits(X_train, X_val, X_test)
+
     print(collections.Counter(y_train))
     print(collections.Counter(y_val))
     print(collections.Counter(y_test))
@@ -619,7 +639,7 @@ def linear_evaluation_coswara(
         test_data, batch_size=batch_size, shuffle=True, num_workers=2
     )
 
-    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, head=head)
+    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, lr=lr, head=head)
 
     logger = CSVLogger(
         save_dir="cks/logs",
@@ -651,6 +671,7 @@ def linear_evaluation_coswara(
                 str(epochs),
                 str(l2_strength),
             ]
+            + ckpt_suffix(standardize)
         )
         + "-{epoch:02d}-{valid_auc:.2f}",
     )
@@ -679,6 +700,8 @@ def linear_evaluation_coswara(
         "with an auc of",
         auc,
     )
+    if return_valid:
+        return auc, float(checkpoint_callback.best_model_score)
     return auc
 
 
@@ -689,6 +712,8 @@ def linear_evaluation_copd_cough(
     lr=1e-5,
     batch_size=32,
     head="linear",
+    standardize=False,
+    return_valid=False,
 ):
     print("*" * 48)
     print("training dataset custom copd Cough ")
@@ -714,6 +739,9 @@ def linear_evaluation_copd_cough(
         # for vggish, this produces a better and more reasonable result, otherwise an extremely low AUROC
         X_train, y_train = downsample_balanced_dataset(X_train, y_train)
 
+    if standardize:
+        X_train, X_val, X_test = standardize_splits(X_train, X_val, X_test)
+
     print(collections.Counter(y_train))
     print(collections.Counter(y_val))
     print(collections.Counter(y_test))
@@ -732,7 +760,7 @@ def linear_evaluation_copd_cough(
         test_data, batch_size=batch_size, shuffle=True, num_workers=2
     )
 
-    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, head=head)
+    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, lr=lr, head=head)
 
     logger = CSVLogger(
         save_dir="cks/logs",
@@ -762,6 +790,7 @@ def linear_evaluation_copd_cough(
                 str(epochs),
                 str(l2_strength),
             ]
+            + ckpt_suffix(standardize)
         )
         + "-{epoch:02d}-{valid_auc:.2f}",
     )
@@ -790,6 +819,8 @@ def linear_evaluation_copd_cough(
         "with an auc of",
         auc,
     )
+    if return_valid:
+        return auc, float(checkpoint_callback.best_model_score)
     return auc
 
 
@@ -801,6 +832,8 @@ def linear_evaluation_coughvid(
     batch_size=64,
     label="sex",
     head="linear",
+    standardize=False,
+    return_valid=False,
 ):
     print("*" * 48)
     print(
@@ -830,6 +863,11 @@ def linear_evaluation_coughvid(
     x_data_test = x_data[y_set == "test"]
     y_label_test = y_label[y_set == "test"]
 
+    if standardize:
+        x_data_train, x_data_vad, x_data_test = standardize_splits(
+            x_data_train, x_data_vad, x_data_test
+        )
+
     train_data = FeatureDataset((x_data_train, y_label_train))
     test_data = FeatureDataset((x_data_test, y_label_test))
     val_data = FeatureDataset((x_data_vad, y_label_vad))
@@ -848,7 +886,7 @@ def linear_evaluation_coughvid(
         test_data, batch_size=batch_size, shuffle=True, num_workers=2
     )
 
-    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength)
+    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, lr=lr)
 
     logger = CSVLogger(
         save_dir="cks/logs",
@@ -880,6 +918,7 @@ def linear_evaluation_coughvid(
                 str(epochs),
                 str(l2_strength),
             ]
+            + ckpt_suffix(standardize)
         )
         + "-{epoch:02d}-{valid_auc:.2f}",
     )
@@ -904,6 +943,8 @@ def linear_evaluation_coughvid(
             label, use_feature, l2_strength, lr
         )
     )
+    if return_valid:
+        return auc, float(checkpoint_callback.best_model_score)
     return auc
 
 
@@ -915,6 +956,8 @@ def linear_evaluation_coviduk(
     batch_size=64,
     modality="exhalation",
     head="linear",
+    standardize=False,
+    return_valid=False,
 ):
     print("*" * 48)
     print(
@@ -944,6 +987,11 @@ def linear_evaluation_coviduk(
     x_data_test = x_data[y_set == "test"]
     y_label_test = y_label[y_set == "test"]
 
+    if standardize:
+        x_data_train, x_data_vad, x_data_test = standardize_splits(
+            x_data_train, x_data_vad, x_data_test
+        )
+
     train_data = FeatureDataset((x_data_train, y_label_train))
     test_data = FeatureDataset((x_data_test, y_label_test))
     val_data = FeatureDataset((x_data_vad, y_label_vad))
@@ -962,7 +1010,7 @@ def linear_evaluation_coviduk(
         test_data, batch_size=batch_size, shuffle=True, num_workers=2
     )
 
-    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength)
+    model = LinearHead(feat_dim=feat_dim, classes=2, l2_strength=l2_strength, lr=lr)
 
     logger = CSVLogger(
         save_dir="cks/logs",
@@ -994,6 +1042,7 @@ def linear_evaluation_coviduk(
                 str(epochs),
                 str(l2_strength),
             ]
+            + ckpt_suffix(standardize)
         )
         + "-{epoch:02d}-{valid_auc:.2f}",
     )
@@ -1017,6 +1066,8 @@ def linear_evaluation_coviduk(
             modality, use_feature, l2_strength, lr, head
         )
     )
+    if return_valid:
+        return auc, float(checkpoint_callback.best_model_score)
     return auc
 
 
@@ -1091,7 +1142,7 @@ def linear_evaluation_ssbpr(
     )
 
     model = LinearHead(
-        feat_dim=feat_dim, classes=n_cls, l2_strength=l2_strength, head=head
+        feat_dim=feat_dim, classes=n_cls, l2_strength=l2_strength, lr=lr, head=head
     )
 
     logger = CSVLogger(
