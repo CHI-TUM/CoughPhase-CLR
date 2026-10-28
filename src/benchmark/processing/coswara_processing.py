@@ -213,6 +213,52 @@ def split_set(modality, label="smoker"):
     )
 
 
+def preprocess_covid_label(modality="cough-shallow"):
+    """maps Coswara labels to 1 and 0 for cross dataset evaluation"""
+    broad_modality = modality.split("-")[0]
+    df = pd.read_csv(
+        "datasets/Coswara-Data/Coswara-Data-master/combined_data.csv", index_col="id"
+    )
+    covid_label_dict = {
+        "positive_mild": 1,
+        "positive_moderate": 1,
+        "positive_asymp": 1,
+        "healthy": 0,
+        "recovered_full": 0,
+    }
+
+    filenames = np.load(
+        feature_dir
+        + "{}_aligned_filenames_sex_w_{}.npy".format(broad_modality, modality)
+    )
+    labels = np.array(
+        [
+            covid_label_dict.get(df.loc[f.split("/")[-2], "covid_status"], -1)
+            for f in filenames
+        ]
+    )
+    used = np.where(labels >= 0)[0]
+    idx_train, idx_test = train_test_split(
+        used, test_size=0.2, random_state=1337, stratify=labels[used]
+    )
+    idx_train, idx_val = train_test_split(
+        idx_train, test_size=0.2, random_state=1337, stratify=labels[idx_train]
+    )
+    split = np.array([""] * len(labels), dtype="<U5")
+    split[idx_train], split[idx_val], split[idx_test] = "train", "val", "test"
+
+    for s in ["train", "val", "test"]:
+        print(modality, s, collections.Counter(labels[split == s]))
+    np.save(
+        feature_dir + "{}_aligned_covid_label_{}.npy".format(broad_modality, modality),
+        labels,
+    )
+    np.save(
+        feature_dir + "{}_aligned_covid_split_{}.npy".format(broad_modality, modality),
+        split,
+    )
+
+
 def check_demographic(modality, label="smoker", trait="label"):
     print("checking training and testing demographic", trait, modality, label)
     broad_modality = modality.split("-")[0]
@@ -258,18 +304,32 @@ def check_demographic(modality, label="smoker", trait="label"):
             print({k: count[k] for k in sorted(count.keys())})
 
 
-def preprocess_spectrogram(modality, label="sex"):
+def spectrogram_file(modality, label="sex", input_sec=8):
+    # short recordings are repeat-padded to input_sec; 8 s is the Coswara default
+    broad_modality = modality.split("-")[0]
+    sec = "" if input_sec == 8 else "sec{}_".format(input_sec)
+    return feature_dir + "{}_aligned_spec_{}{}_w_{}.npz".format(
+        broad_modality, sec, modality, label
+    )
+
+
+def preprocess_spectrogram(modality, label="sex", input_sec=8):
     audio_images = []
     broad_modality = modality.split("-")[0]
 
-    if os.path.exists(
-        feature_dir
-        + "{}_aligned_spec_{}_w_{}.npz".format(broad_modality, modality, label)
-    ):
-        print("spectrogram of {} with {} label already exist".format(modality, label))
+    if os.path.exists(spectrogram_file(modality, label, input_sec)):
+        print(
+            "spectrogram of {} with {} label (input_sec {}) already exist".format(
+                modality, label, input_sec
+            )
+        )
         return
 
-    print("preprocessing spectrogram of {} with {} label".format(modality, label))
+    print(
+        "preprocessing spectrogram of {} with {} label (input_sec {})".format(
+            modality, label, input_sec
+        )
+    )
     check_data_dir()
     sound_dir_loc = np.load(
         feature_dir
@@ -278,15 +338,11 @@ def preprocess_spectrogram(modality, label="sex"):
     print("number of files", len(sound_dir_loc))
     for file in tqdm(sound_dir_loc):
         data = get_entire_signal_librosa(
-            "", file.split(".")[0], spectrogram=True, pad=True
+            "", file.split(".")[0], spectrogram=True, pad=True, input_sec=input_sec
         )
         audio_images.append(data)
     # np.savez(feature_dir + "entire_spec_all_{}_w_{}.npz".format(modality, label), *audio_images)
-    np.savez(
-        feature_dir
-        + "{}_aligned_spec_{}_w_{}.npz".format(broad_modality, modality, label),
-        *audio_images,
-    )
+    np.savez(spectrogram_file(modality, label, input_sec), *audio_images)
 
 
 def extract_and_save_embeddings_baselines(modality, label="sex", feature="opensmile"):
@@ -341,18 +397,8 @@ def extract_and_save_embeddings(
     from src.benchmark.model_util import extract_opera_feature
 
     # sound_dir_loc = np.load("datasets/Coswara-Data/entireaudio_filenames_{}_w_{}.npy".format(modality, label))
-    broad_modality = modality.split("-")[0]
-    if input_sec == 2:
-        audio_images = np.load(
-            feature_dir
-            + "{}_aligned_spec_pad2_{}_w_{}.npz".format(broad_modality, modality, label)
-        )
-    else:
-        # default 8
-        audio_images = np.load(
-            feature_dir
-            + "{}_aligned_spec_{}_w_{}.npz".format(broad_modality, modality, label)
-        )
+    # default 8 s; the old cough_aligned_spec_pad2_* file is only a git lfs pointer
+    audio_images = np.load(spectrogram_file(modality, label, input_sec))
     audio_images = [audio_images[f] for f in audio_images.files]
     opera_features = extract_opera_feature(
         audio_images, pretrain=feature, from_spec=True, input_sec=input_sec, dim=dim
@@ -373,8 +419,15 @@ if __name__ == "__main__":
     parser.add_argument("--min_len_cnn", type=int, default=2)
     parser.add_argument("--min_len_htsat", type=int, default=8)
     parser.add_argument("--output_file_name", type=str, default="")
+    parser.add_argument("--input_sec", type=int, default=8)
+    parser.add_argument("--covid_labels", action="store_true")
 
     args = parser.parse_args()
+
+    if args.covid_labels:
+        for modality in ["cough-shallow", "cough-heavy"]:
+            preprocess_covid_label(modality)
+        raise SystemExit
 
     if not os.path.exists(feature_dir):
         check_data_dir()
@@ -396,12 +449,16 @@ if __name__ == "__main__":
             input_sec = args.min_len_cnn
         elif args.pretrain == "operaGT":
             input_sec = 8.18
-        preprocess_spectrogram(args.modality, args.label)
+        output_file_name = args.output_file_name
+        if args.input_sec != 8:
+            assert output_file_name, "--input_sec needs --output_file_name"
+            output_file_name += "_sec{}".format(args.input_sec)
+        preprocess_spectrogram(args.modality, args.label, args.input_sec)
         extract_and_save_embeddings(
             args.pretrain,
             args.modality,
             args.label,
-            input_sec=8,
+            input_sec=args.input_sec,
             dim=args.dim,
-            output_file_name=args.output_file_name,
+            output_file_name=output_file_name,
         )

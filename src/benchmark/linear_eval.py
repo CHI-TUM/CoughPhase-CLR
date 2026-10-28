@@ -1071,6 +1071,178 @@ def linear_evaluation_coviduk(
     return auc
 
 
+# padding length (input_sec of get_entire_signal_librosa) each eval set's features are extracted with;
+# features with another padding length are stored as <feature>_sec<N>_feature_...
+NATIVE_SEC = {
+    "coviduk": 2,
+    "coughvidcovid": 2,
+    "coughvidsex": 2,
+    "coswaracovid": 8,
+    "coswarasex": 8,
+}
+
+
+def eval_feature_name(use_feature, dataset, input_sec=None):
+    if input_sec is None or input_sec == NATIVE_SEC[dataset]:
+        return use_feature
+    return "{}_sec{}".format(use_feature, input_sec)
+
+
+def load_eval_splits(dataset, use_feature, input_sec=None):
+    """Train / val / test (features, labels, file names) of a binary eval set, split exactly as in its
+    linear_evaluation_* function. input_sec selects features extracted with another padding length."""
+    feature = eval_feature_name(use_feature, dataset, input_sec)
+
+    if dataset in ["coviduk", "coughvidcovid", "coughvidsex"]:
+        feature_dir, key = {
+            "coviduk": ("feature/coviduk_eval/", "cough"),
+            "coughvidcovid": ("feature/coughvid_eval/", "covid"),
+            "coughvidsex": ("feature/coughvid_eval/", "gender"),
+        }[dataset]
+        y_set = np.load(feature_dir + "split_{}.npy".format(key))
+        y_label = np.load(feature_dir + "label_{}.npy".format(key))
+        files = np.load(feature_dir + "sound_dir_loc_{}.npy".format(key))
+        x_data = np.load(feature_dir + feature + "_feature_{}.npy".format(key)).squeeze()
+        if use_feature == "vggish":
+            x_data = np.nan_to_num(x_data)
+        assert len(x_data) == len(y_label) == len(files)
+        return {
+            s: (x_data[y_set == s], y_label[y_set == s], files[y_set == s])
+            for s in ["train", "val", "test"]
+        }
+
+    # coswara cough-shallow; COVID-19 reuses the files and features of the sex list
+    feature_dir, modality = "feature/coswara_eval/", "cough-shallow"
+    files = np.load(feature_dir + "cough_aligned_filenames_sex_w_{}.npy".format(modality))
+    features = np.load(
+        feature_dir + feature + "_feature_{}_sex.npy".format(modality)
+    ).squeeze()
+    if dataset == "coswarasex":
+        labels = np.load(feature_dir + "cough_aligned_sex_label_{}.npy".format(modality))
+        # same runtime split as linear_evaluation_coswara (splitting indices permutes like the arrays)
+        idx = np.arange(len(labels))
+        idx_train, idx_test = train_test_split(
+            idx, test_size=0.2, random_state=1337, stratify=labels
+        )
+        idx_train, idx_val = train_test_split(
+            idx_train, test_size=0.2, random_state=1337, stratify=labels[idx_train]
+        )
+        split = {"train": idx_train, "val": idx_val, "test": idx_test}
+    else:
+        labels = np.load(feature_dir + "cough_aligned_covid_label_{}.npy".format(modality))
+        y_set = np.load(feature_dir + "cough_aligned_covid_split_{}.npy".format(modality))
+        split = {s: np.where(y_set == s)[0] for s in ["train", "val", "test"]}
+    assert len(features) == len(labels) == len(files)
+    return {s: (features[i], labels[i], files[i]) for s, i in split.items()}
+
+
+def linear_evaluation_cross(
+    train_on,
+    test_on,
+    use_feature="operaCE1280",
+    l2_strength=1e-5,
+    epochs=64,
+    lr=1e-4,
+    batch_size=64,
+    head="linear",
+    standardize=False,
+    return_valid=False,
+    match_preprocessing=True,
+):
+    """Cross-dataset evaluation: train the head on the train split of train_on (checkpoint picked on its
+    val split) and test it on the test split of test_on. The training side always uses its own features;
+    with match_preprocessing the test features are extracted with train_on's padding length."""
+    test_sec = NATIVE_SEC[train_on] if match_preprocessing else None
+    print("*" * 48)
+    print(
+        "cross-dataset: train {} (feature {}) -> test {} (feature {}) with l2_strength {} lr {} head {}".format(
+            train_on,
+            eval_feature_name(use_feature, train_on),
+            test_on,
+            eval_feature_name(use_feature, test_on, test_sec),
+            l2_strength,
+            lr,
+            head,
+        )
+    )
+
+    source = load_eval_splits(train_on, use_feature)
+    target = load_eval_splits(test_on, use_feature, input_sec=test_sec)
+    X_train, y_train, _ = source["train"]
+    X_val, y_val, _ = source["val"]
+    X_test, y_test, _ = target["test"]
+    for y in [y_train, y_val, y_test]:
+        assert set(np.unique(y)) == {0, 1}, collections.Counter(y)
+
+    if standardize:
+        # fitted on the training split of train_on only
+        X_train, X_val, X_test = standardize_splits(X_train, X_val, X_test)
+
+    print(collections.Counter(y_train))
+    print(collections.Counter(y_val))
+    print(collections.Counter(y_test))
+
+    train_loader = DataLoader(
+        FeatureDataset((X_train, y_train)), batch_size=batch_size, num_workers=2, shuffle=True
+    )
+    val_loader = DataLoader(
+        FeatureDataset((X_val, y_val)), batch_size=batch_size, num_workers=2, shuffle=True
+    )
+    test_loader = DataLoader(
+        FeatureDataset((X_test, y_test)), batch_size=batch_size, shuffle=True, num_workers=2
+    )
+
+    model = LinearHead(
+        feat_dim=X_train.shape[1], classes=2, l2_strength=l2_strength, lr=lr, head=head
+    )
+
+    checkpoint_callback = ModelCheckpoint(
+        monitor="valid_auc",
+        mode="max",
+        dirpath="cks/linear/cross/",
+        filename="_".join(
+            [
+                head,
+                train_on,
+                "to",
+                test_on,
+                "matched" if match_preprocessing else "unmatched",
+                use_feature,
+                str(batch_size),
+                str(lr),
+                str(epochs),
+                str(l2_strength),
+            ]
+            + ckpt_suffix(standardize)
+        )
+        + "-{epoch:02d}-{valid_auc:.2f}",
+    )
+
+    trainer = pl.Trainer(
+        max_epochs=epochs,
+        accelerator="gpu",
+        devices=1,
+        logger=False,
+        callbacks=[DecayLearningRate(), checkpoint_callback],
+        gradient_clip_val=1.0,
+        log_every_n_steps=1,
+        enable_progress_bar=False,
+    )
+    trainer.fit(model, train_loader, val_loader)
+
+    test_res = trainer.test(dataloaders=test_loader)
+    auc = test_res[0]["test_auc"]
+    print(
+        "finished cross-dataset train {} -> test {} using feature extracted by {} with an auc of".format(
+            train_on, test_on, use_feature
+        ),
+        auc,
+    )
+    if return_valid:
+        return auc, float(checkpoint_callback.best_model_score)
+    return auc
+
+
 def linear_evaluation_ssbpr(
     n_cls=5,
     use_feature="opensmile",

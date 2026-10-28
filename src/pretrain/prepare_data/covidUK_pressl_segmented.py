@@ -9,12 +9,16 @@ from glob import glob
 
 ### for pretraining
 def preprocess_spectrogram_SSL(
-    modality="modality", input_sec=2, form="", nfft=1024, hop=512, TRIM=True
+    modality="modality",
+    input_sec=2,
+    form="",
+    nfft=1024,
+    hop=512,
+    TRIM=True,
+    path="datasets/covidUK/",
 ):
 
-    path = "datasets/covidUK/"
-
-    output_dir = f"datasets/covidUK/entire_spec_npy{form}/"
+    output_dir = f"{path}entire_spec_npy{form}/"
     os.makedirs(output_dir, exist_ok=True)
 
     filenames = glob(path + f"audio{form}/*.wav")
@@ -47,7 +51,7 @@ def preprocess_spectrogram_SSL(
 
             # saving to individual npy files
             np.save(output_dir + userID + ".npy", data)
-            filename_list.append(f"datasets/covidUK/entire_spec_npy{form}/" + userID)
+            filename_list.append(f"{path}entire_spec_npy{form}/" + userID)
 
     np.save(path + "entire_" + modality + "_filenames_segmented.npy", filename_list)
     print(
@@ -67,6 +71,7 @@ if __name__ == "__main__":
     parser.add_argument("--nfft", type=int, default=1024)
     parser.add_argument("--hop", type=int, default=512)
     parser.add_argument("--TRIM", type=bool, default=True)
+    parser.add_argument("--root", type=str, default="datasets/covidUK/")
 
     args = parser.parse_args()
 
@@ -77,4 +82,5 @@ if __name__ == "__main__":
         nfft=args.nfft,
         hop=args.hop,
         TRIM=args.TRIM,
+        path=args.root.rstrip("/") + "/",
     )

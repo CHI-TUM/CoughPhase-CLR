@@ -108,6 +108,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_len_cnn", type=int, default=2)
     parser.add_argument("--min_len_htsat", type=int, default=2)
     parser.add_argument("--output_file_name", type=str, default="")
+    parser.add_argument("--input_sec", type=int, default=None)
 
     args = parser.parse_args()
 
@@ -120,10 +121,16 @@ if __name__ == "__main__":
     else:
         input_sec = args.min_len_cnn
 
+    output_file_name = args.output_file_name
+    if args.input_sec is not None and args.input_sec != input_sec:
+        assert output_file_name, "--input_sec needs --output_file_name"
+        output_file_name += "_sec{}".format(args.input_sec)
+        input_sec = args.input_sec
+
     extract_and_save_embeddings(
         args.pretrain,
         args.label,
         input_sec,
         dim=args.dim,
-        output_file_name=args.output_file_name,
+        output_file_name=output_file_name,
     )
